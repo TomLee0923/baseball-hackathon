@@ -150,6 +150,17 @@ if __name__ == "__main__":
     # 2. 整理打席
     df = extract_plate_appearances(game)
     
+    # 標記結果是否缺失，不直接刪除原始紀錄
+    df["result_missing"] = (
+        df["result"].isna()
+        | (df["result"].astype(str).str.strip() == "")
+    )
+
+    # 標記可能需要進一步確認的紀錄
+    df["needs_review"] = df["result_missing"]
+
+    print("需要人工確認的紀錄數：", df["needs_review"].sum())
+    
     print("\n打席結果分布：")
     print(df["result"].value_counts(dropna=False))
 
@@ -165,6 +176,37 @@ if __name__ == "__main__":
 
     # 4. 驗證資料
     report = validate_plate_appearances(df)
+    
+    # 找出 result 為空字串或缺失值的紀錄
+    empty_result = df[
+        df["result"].isna()
+        | (df["result"].astype(str).str.strip() == "")
+    ]
+
+    print("\n空白 result 的完整紀錄：")
+    for _, row in empty_result.iterrows():
+        print(row.to_dict())
+        
+    # 識別可能是突破僵局制跑者的占位紀錄
+    placeholder_mask = (
+        (df["inning"] >= 10)
+        & (df["result"].fillna("").astype(str).str.strip() == "")
+        & df["pitchCodes"].apply(
+            lambda x: isinstance(x, list) and len(x) == 0
+        )
+        & df["events"].apply(
+            lambda x: isinstance(x, list) and len(x) == 0
+        )
+    )
+
+    df.loc[placeholder_mask, "record_type"] = (
+        "tiebreak_runner_placeholder"
+    )
+
+    print("\n特殊占位紀錄數：")
+    print(
+        (df["record_type"] == "tiebreak_runner_placeholder").sum()
+    )
 
     # 5. 匯出 CSV
     output_dir = PROJECT_ROOT / "data" / "processed"
