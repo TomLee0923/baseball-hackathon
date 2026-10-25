@@ -1,4 +1,3 @@
-
 import json
 import numbers
 from pathlib import Path
@@ -22,7 +21,6 @@ OUTPUT_PATH = OUTPUT_DIR / "plate_appearances_all.csv"
 
 def load_game_json(file_path):
     """讀取單場比賽 JSON，並檢查最外層格式。"""
-
     with open(file_path, "r", encoding="utf-8") as file:
         data = json.load(file)
 
@@ -34,7 +32,6 @@ def load_game_json(file_path):
 
 def is_empty_result(value):
     """判斷打席結果是否為空或缺失。"""
-
     if value is None:
         return True
 
@@ -47,9 +44,26 @@ def is_empty_result(value):
         return False
 
 
+def is_empty_list(value):
+    """判斷欄位是否為空列表。"""
+    return isinstance(value, list) and len(value) == 0
+
+
+def as_int(value):
+    """將整數或整數字串安全轉為 int；無法轉換則回傳 None。"""
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+        if number.is_integer():
+            return int(number)
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
 def decode_bases(bases):
     """將 0～7 的壘況編碼轉成文字。"""
-
     base_names = {
         0: "無人在壘",
         1: "一壘有人",
@@ -61,19 +75,25 @@ def decode_bases(bases):
         7: "滿壘",
     }
 
-    if isinstance(bases, bool):
-        return "未知壘況"
-
-    if not isinstance(bases, numbers.Integral):
-        return "未知壘況"
-
-    return base_names.get(int(bases), "未知壘況")
+    value = as_int(bases)
+    return base_names.get(value, "未知壘況")
 
 
-def is_empty_list(value):
-    """判斷欄位是否為空列表。"""
+def serialize_json_field(value):
+    """將 list/dict 以標準 JSON 字串存入 CSV；保留空值為空字串。"""
+    if isinstance(value, (list, dict)):
+        return json.dumps(value, ensure_ascii=False)
 
-    return isinstance(value, list) and len(value) == 0
+    if value is None:
+        return ""
+
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+
+    return value
 
 
 # =========================
@@ -82,19 +102,23 @@ def is_empty_list(value):
 
 def is_tiebreak_placeholder(pa_list, index):
     """
-    以多項條件辨識可能的突破僵局制占位紀錄。
+    辨識「高度疑似」突破僵局制占位紀錄。
 
-    這是依目前資料觀察建立的辨識規則，
-    不代表已證明所有資料來源都使用相同規則。
+    條件：
+    1. 第 10 局或之後；
+    2. result 為空，且 pitchCodes/events 都是空列表；
+    3. 前一筆是前一局最後一筆打席，且 endOuts == 3；
+    4. 下一筆是同一局的實際打席，且起始 bases == 2。
+
+    注意：這是依目前資料觀察建立的規則，仍應以更多場次驗證。
+    不以 batterName 相同作為必要條件，避免第三出局為跑者出局時漏判。
     """
-
     pa = pa_list[index]
 
-    # 基本條件：延長局、結果空白、沒有投球與事件
     if not isinstance(pa, dict):
         return False
 
-    if pa.get("inning", 0) < 10:
+    if (as_int(pa.get("inning")) or 0) < 10:
         return False
 
     if not is_empty_result(pa.get("result")):
@@ -106,33 +130,36 @@ def is_tiebreak_placeholder(pa_list, index):
     if not is_empty_list(pa.get("events")):
         return False
 
-    # 需要前後紀錄才能進一步交叉驗證
+    # 必須有前後紀錄才能交叉驗證
     if index == 0 or index + 1 >= len(pa_list):
         return False
 
     previous_pa = pa_list[index - 1]
     next_pa = pa_list[index + 1]
 
-    if not isinstance(previous_pa, dict):
+    if not isinstance(previous_pa, dict) or not isinstance(next_pa, dict):
         return False
 
-    if not isinstance(next_pa, dict):
-        return False
+    current_inning = as_int(pa.get("inning"))
+    previous_inning = as_int(previous_pa.get("inning"))
+    next_inning = as_int(next_pa.get("inning"))
 
-    # 前一筆應是前一局結束時的最後一個打者
     previous_is_last_out = (
-        previous_pa.get("inning") == pa.get("inning") - 1
-        and previous_pa.get("endOuts") == 3
-        and previous_pa.get("batterName") == pa.get("batterName")
+        current_inning is not None
+        and previous_inning == current_inning - 1
+        and as_int(previous_pa.get("endOuts")) == 3
     )
 
-    # 下一筆應是同一局的實際打席，且打席前二壘有人
-    next_is_expected_state = (
-        next_pa.get("inning") == pa.get("inning")
-        and next_pa.get("bases") == 2
+    next_is_actual_pa_with_runner_on_second = (
+        next_inning == current_inning
+        and as_int(next_pa.get("bases")) == 2
+        and not is_empty_result(next_pa.get("result"))
     )
 
-    return previous_is_last_out and next_is_expected_state
+    return (
+        previous_is_last_out
+        and next_is_actual_pa_with_runner_on_second
+    )
 
 
 # =========================
@@ -140,11 +167,12 @@ def is_tiebreak_placeholder(pa_list, index):
 # =========================
 
 def extract_plate_appearances(game, source_file):
-    """將單場比賽整理為打席資料列。"""
-
+    """將單場比賽的客隊與主隊打席整理成同一份資料。"""
     rows = []
 
-    game_id = f"{game.get('seasonId', '')}-{game.get('seq', '')}"
+    season_id = game.get("seasonId", "")
+    seq = game.get("seq", "")
+    game_id = f"{season_id}-{seq}"
 
     game_metadata = {
         "game_id": game_id,
@@ -153,7 +181,9 @@ def extract_plate_appearances(game, source_file):
         "seq": game.get("seq"),
         "date": game.get("date"),
         "stadium": game.get("stadium"),
+        "awayTeamId": game.get("awayTeamId"),
         "awayTeam": game.get("awayTeam"),
+        "homeTeamId": game.get("homeTeamId"),
         "homeTeam": game.get("homeTeam"),
         "source_file": str(source_file),
     }
@@ -176,14 +206,10 @@ def extract_plate_appearances(game, source_file):
             row = pa.copy()
             row.update(game_metadata)
             row["team_side"] = side
-
-            # 所有紀錄先有預設類型
             row["record_type"] = "plate_appearance"
 
             if is_tiebreak_placeholder(pa_list, index):
-                row["record_type"] = (
-                    "tiebreak_runner_placeholder"
-                )
+                row["record_type"] = "tiebreak_runner_placeholder"
 
             rows.append(row)
 
@@ -195,8 +221,7 @@ def extract_plate_appearances(game, source_file):
 # =========================
 
 def validate_plate_appearances(df):
-    """檢查必要欄位與基本棒球狀態。"""
-
+    """檢查必要欄位及基本棒球狀態；不將狀態連續性直接視為硬性錯誤。"""
     required_columns = [
         "game_id",
         "team_side",
@@ -214,8 +239,7 @@ def validate_plate_appearances(df):
     ]
 
     missing_columns = [
-        col for col in required_columns
-        if col not in df.columns
+        col for col in required_columns if col not in df.columns
     ]
 
     report = {
@@ -228,29 +252,13 @@ def validate_plate_appearances(df):
         print("缺少必要欄位：", missing_columns)
         return report
 
-    outs_valid = df["outs"].map(
-        lambda x: (
-            isinstance(x, numbers.Integral)
-            and not isinstance(x, bool)
-            and 0 <= x <= 2
-        )
-    )
+    def valid_range(value, low, high):
+        number = as_int(value)
+        return number is not None and low <= number <= high
 
-    bases_valid = df["bases"].map(
-        lambda x: (
-            isinstance(x, numbers.Integral)
-            and not isinstance(x, bool)
-            and 0 <= x <= 7
-        )
-    )
-
-    inning_valid = df["inning"].map(
-        lambda x: (
-            isinstance(x, numbers.Integral)
-            and not isinstance(x, bool)
-            and x >= 1
-        )
-    )
+    outs_valid = df["outs"].map(lambda x: valid_range(x, 0, 2))
+    bases_valid = df["bases"].map(lambda x: valid_range(x, 0, 7))
+    inning_valid = df["inning"].map(lambda x: valid_range(x, 1, 999))
 
     report["invalid_rows"] = {
         "invalid_outs": int((~outs_valid).sum()),
@@ -260,7 +268,6 @@ def validate_plate_appearances(df):
 
     print("\n資料品質報告：")
     print(report)
-
     return report
 
 
@@ -270,11 +277,8 @@ def validate_plate_appearances(df):
 
 def main():
     if not DATA_DIR.exists():
-        raise FileNotFoundError(
-            f"找不到原始資料資料夾：{DATA_DIR}"
-        )
+        raise FileNotFoundError(f"找不到原始資料資料夾：{DATA_DIR}")
 
-    # 遞迴尋找所有 JSON
     json_files = sorted(DATA_DIR.rglob("*.json"))
 
     if not json_files:
@@ -290,12 +294,9 @@ def main():
     for file_path in json_files:
         try:
             game = load_game_json(file_path)
+            relative_path = file_path.relative_to(PROJECT_ROOT).as_posix()
 
-            rows = extract_plate_appearances(
-                game,
-                file_path.relative_to(PROJECT_ROOT),
-            )
-
+            rows = extract_plate_appearances(game, relative_path)
             all_rows.extend(rows)
 
             print(
@@ -308,7 +309,6 @@ def main():
                 "file": str(file_path),
                 "error": str(error),
             })
-
             print(f"處理失敗：{file_path.name}：{error}")
 
     if not all_rows:
@@ -316,65 +316,63 @@ def main():
 
     df = pd.DataFrame(all_rows)
 
-    # 結果缺失與人工確認分開處理
-    df["result_missing"] = (
-        df["result"].map(is_empty_result)
-    )
+    # 空白結果與是否需要人工確認分開處理
+    df["result_missing"] = df["result"].map(is_empty_result)
 
     is_placeholder = (
         df["record_type"] == "tiebreak_runner_placeholder"
     )
 
-    df["needs_review"] = (
-        df["result_missing"] & ~is_placeholder
+    df["needs_review"] = df["result_missing"] & ~is_placeholder
+    df["review_reason"] = ""
+
+    # 保留原始 result；另提供分析標籤，避免終端輸出出現難辨識的空白類別
+    df["result_for_analysis"] = df["result"]
+    df.loc[is_placeholder, "result_for_analysis"] = "PLACEHOLDER"
+    df.loc[df["needs_review"], "review_reason"] = (
+        "result 為空，且未符合目前的特殊占位紀錄辨識條件"
     )
 
-    # 壘況文字僅供閱讀，保留原始 bases 編碼
+    # 只新增壘況文字，不覆寫原始 bases 編碼
     df["bases_text"] = df["bases"].apply(decode_bases)
 
-    # 檢查資料
-    report = validate_plate_appearances(df)
+    # 保留原始 RE/WPA 等欄位；另建立供分析使用的欄位，
+    # 避免特殊占位紀錄的數值混入一般打席統計。
+    for source_col, analysis_col in [
+        ("RE", "RE_for_analysis"),
+        ("WPA", "WPA_for_analysis"),
+        ("RE24", "RE24_for_analysis"),
+        ("homeWE", "homeWE_for_analysis"),
+    ]:
+        if source_col in df.columns:
+            df[analysis_col] = df[source_col].where(~is_placeholder, "")
+
+    validate_plate_appearances(df)
 
     print("\n紀錄類型分布：")
     print(df["record_type"].value_counts(dropna=False))
 
-    print("\n打席結果分布：")
-    print(df["result"].value_counts(dropna=False))
+    print("\n打席結果分布（分析標籤）：")
+    print(df["result_for_analysis"].value_counts(dropna=False))
 
     print("\n仍需人工確認的紀錄數：")
     print(int(df["needs_review"].sum()))
 
-    # 檢查同一比賽識別碼是否出現在多個檔案
-    game_file_counts = (
-        df.groupby("game_id")["source_file"].nunique()
-    )
-
-    duplicate_game_ids = game_file_counts[
-        game_file_counts > 1
-    ]
+    # 檢查同一 game_id 是否出現在多個不同來源檔案
+    game_file_counts = df.groupby("game_id")["source_file"].nunique()
+    duplicate_game_ids = game_file_counts[game_file_counts > 1]
 
     if not duplicate_game_ids.empty:
         print("\n警告：發現重複 game_id，請確認是否為不同版本資料：")
         print(duplicate_game_ids)
 
-    # 匯出前，將巢狀欄位轉成標準 JSON 字串
+    # 將巢狀資料序列化為標準 JSON 字串，方便 CSV 讀回後重新解析
     for col in ["pitchCodes", "events"]:
         if col in df.columns:
-            df[col] = df[col].apply(
-                lambda value: json.dumps(
-                    value,
-                    ensure_ascii=False
-                ) if isinstance(value, (list, dict))
-                else value
-            )
+            df[col] = df[col].apply(serialize_json_field)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    df.to_csv(
-        OUTPUT_PATH,
-        index=False,
-        encoding="utf-8-sig",
-    )
+    df.to_csv(OUTPUT_PATH, index=False, encoding="utf-8-sig")
 
     print(f"\n成功匯出：{OUTPUT_PATH}")
     print(f"成功整理紀錄數：{len(df)}")
