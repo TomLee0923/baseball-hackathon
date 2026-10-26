@@ -13,6 +13,16 @@ re_engine.py：由 plate_appearances_all.csv 計算 24 種壘況／出局數狀�
   突破僵局制；以 2025 資料檢驗，排除延長賽對 24 格 RE 的影響最大 0.032、
   平均 0.007，均在標準誤內，因此各年度合併計算。
 
+階段 C 新增欄位（re_observations.csv，每個真實打席一列）
+------------------------------------------------------------
+- result、pitchCodes、record_type：原樣帶入，不改寫、不補值。
+- runs_remaining：從「該打席開始前」算起的剩餘得分（RE 即其平均）。
+- runs_after：從「該打席結束後」算起的剩餘得分 = 半局最終得分 − 下一個真實打席
+  的打席前比分；該半局最後一個打席為 0。
+- runs_on_play：該打席本身造成的得分 = runs_remaining − runs_after。
+- next_outs、next_bases：同半局下一個真實打席的打席前狀態；半局最後一個打席為空，
+  next_is_half_end 為 True（僅在 half_complete 時有意義）。不使用 endBases。
+
 注意：Rebas 公布的 RE 為 2018 年至今逐日累積值；本引擎主表為 --primary-season
 指定範圍（預設 pooled＝所有賽季合併），另輸出各季比較（re_by_season.csv）。
 與來源的對照以資料內 RE 欄位（最後 90 天平均）為準，差距僅供量級與趨勢對照。
@@ -121,15 +131,32 @@ def build_observations(df):
                 "final_source": final_source,
             })
 
-            for _, r in sub.iterrows():
+            sub = sub.reset_index(drop=True)
+            for k in range(len(sub)):
+                r = sub.iloc[k]
+                if k + 1 < len(sub):
+                    nxt = sub.iloc[k + 1]
+                    next_outs, next_bases = as_int(nxt["outs"]), as_int(nxt["bases"])
+                    runs_after = final - nxt["own_before"]
+                else:
+                    next_outs, next_bases = None, None
+                    runs_after = 0
+                runs_remaining = final - r["own_before"]
                 obs_rows.append({
                     "game_id": game_id,
                     "season_id": game_id.rsplit("-", 1)[0],
                     "half": half, "inning": (half + 1) // 2,
                     "outs": as_int(r["outs"]), "bases": as_int(r["bases"]),
-                    "runs_remaining": final - r["own_before"],
+                    "runs_remaining": runs_remaining,
                     "half_complete": bool(complete),
                     "final_source": final_source,
+                    "result": r["result"],
+                    "pitchCodes": r["pitchCodes"],
+                    "record_type": r["record_type"],
+                    "runs_after": runs_after,
+                    "runs_on_play": runs_remaining - runs_after,
+                    "next_outs": next_outs, "next_bases": next_bases,
+                    "next_is_half_end": next_outs is None,
                 })
 
     return pd.DataFrame(obs_rows), pd.DataFrame(half_rows)
@@ -237,7 +264,7 @@ def main(argv=None):
     df = pd.read_csv(args.input)
     needed = ["game_id", "team_side", "inning", "outs", "bases", "awayScores",
               "homeScores", "endOuts", "endAwayScores", "endHomeScores",
-              "events", "record_type"]
+              "events", "record_type", "result", "pitchCodes"]
     missing = [c for c in needed if c not in df.columns]
     if missing:
         print(f"輸入檔缺少欄位：{missing}")
