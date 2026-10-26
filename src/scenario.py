@@ -86,8 +86,8 @@ def mean_se(series):
     return series.mean(), se
 
 
-def load_scenario(path, outs, bases):
-    """讀入觀察值，取指定起始狀態，並與 RE 同口徑（完整半局、剩餘得分 >= 0）。"""
+def read_observations(path):
+    """讀入 re_observations.csv 並檢查欄位（API 啟動時只需讀一次）。"""
     obs = pd.read_csv(path)
     needed = ["season_id", "outs", "bases", "half_complete", "runs_remaining",
               "runs_after", "runs_on_play", "next_outs", "next_bases",
@@ -97,6 +97,11 @@ def load_scenario(path, outs, bases):
         raise SystemExit(
             f"{path} 缺少欄位 {missing}；請先用新版 re_engine.py 重新產生。"
         )
+    return obs
+
+
+def prepare_state(obs, outs, bases):
+    """取指定起始狀態，並與 RE 同口徑（完整半局、剩餘得分 >= 0）。"""
     state = obs[(obs["outs"] == outs) & (obs["bases"] == bases)]
     valid = state[state["half_complete"] & (state["runs_remaining"] >= 0)].copy()
 
@@ -108,7 +113,7 @@ def load_scenario(path, outs, bases):
             valid["next_is_half_end"], valid["next_outs"], valid["next_bases"]
         )
     ]
-    return obs, state, valid
+    return state, valid
 
 
 def re_by_scope(obs_all, outs, bases):
@@ -194,35 +199,20 @@ def bunt_by_result(valid):
     return out
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(description="階段 C：情境分析")
-    parser.add_argument("--outs", type=int, default=0, choices=[0, 1, 2])
-    parser.add_argument("--bases", type=int, default=1, choices=range(8))
-    parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
-    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
-    args = parser.parse_args(argv)
-
-    if not args.input.exists():
-        print(f"找不到輸入檔：{args.input}（請先執行 python src\\re_engine.py）")
-        return 1
-
-    obs_all, state, valid = load_scenario(args.input, args.outs, args.bases)
-    label = state_label(args.outs, args.bases)
-
-    scope = re_by_scope(obs_all, args.outs, args.bases)
+def analyze(obs, outs, bases):
+    """對指定狀態做完整分析；CLI 與 API 共用。回傳 dict（含 DataFrame）。"""
+    state, valid = prepare_state(obs, outs, bases)
+    scope = re_by_scope(obs, outs, bases)
     cat = by_category(valid)
-    trans = transitions(valid)
-    bunt = bunt_compare(valid)
-    bunt_res = bunt_by_result(valid)
 
     # 自我檢查：大類樣本合計 = 納入樣本；加權平均 = RE
-    assert cat["n"].sum() == len(valid)
     pooled_re = float(scope.loc[scope["scope"] == "三季合併", "RE"].iloc[0])
+    assert cat["n"].sum() == len(valid)
     weighted = float((cat["n"] * cat["mean_runs_remaining"]).sum() / cat["n"].sum())
     assert abs(weighted - pooled_re) < 1e-9, (weighted, pooled_re)
 
     summary = {
-        "state": {"outs": args.outs, "bases": args.bases, "label": label},
+        "state": {"outs": outs, "bases": bases, "label": state_label(outs, bases)},
         "observations_in_state": int(len(state)),
         "observations_used": int(len(valid)),
         "excluded_incomplete_half": int(len(state) - len(valid)),
@@ -235,9 +225,33 @@ def main(argv=None):
         "caveats": [
             "歷史相關，非因果；觸擊與否有選擇偏誤（分差、局數、打者能力）。",
             "標準誤假設觀察值獨立，同半局內相關，實際略大。",
-            "BUNT 代碼不等於犧牲成功；請對照 bunt_by_result.csv。",
+            "BUNT 代碼不等於犧牲成功；請對照 bunt_by_result。",
         ],
     }
+    return {
+        "summary": summary, "scope": scope, "by_category": cat,
+        "transitions": transitions(valid), "bunt_compare": bunt_compare(valid),
+        "bunt_by_result": bunt_by_result(valid),
+    }
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="階段 C：情境分析")
+    parser.add_argument("--outs", type=int, default=0, choices=[0, 1, 2])
+    parser.add_argument("--bases", type=int, default=1, choices=range(8))
+    parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
+    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    args = parser.parse_args(argv)
+
+    if not args.input.exists():
+        print(f"找不到輸入檔：{args.input}（請先執行 python src\\re_engine.py）")
+        return 1
+
+    obs = read_observations(args.input)
+    result = analyze(obs, args.outs, args.bases)
+    summary = result["summary"]
+    scope, cat, trans = result["scope"], result["by_category"], result["transitions"]
+    bunt, bunt_res = result["bunt_compare"], result["bunt_by_result"]
 
     out_dir = args.output_root / f"scenario_{args.outs}out_bases{args.bases}"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -257,8 +271,8 @@ def main(argv=None):
 
     pd.set_option("display.width", 200)
     pd.set_option("display.max_columns", 20)
-    print(f"情境：{label}　（納入 {len(valid)} 筆；"
-          f"排除不完整半局 {len(state) - len(valid)} 筆）\n")
+    print(f"情境：{summary['state']['label']}　（納入 {summary['observations_used']} 筆；"
+          f"排除不完整半局 {summary['excluded_incomplete_half']} 筆）\n")
     print("【RE 與樣本數】")
     print(scope.round(4).to_string(index=False))
     print("\n【打席結果大類】（remaining=從打席開始算；after=打席結束後）")
