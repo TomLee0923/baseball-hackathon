@@ -1,5 +1,5 @@
 """
-main.py：階段 D，FastAPI 情境查詢 Demo。
+main.py：階段 D，FastAPI 情境查詢服務。
 
 啟動（專案根目錄，已啟用 .venv）：
     python -m uvicorn main:app --app-dir src --reload
@@ -40,7 +40,7 @@ if not OBS_PATH.exists():
 OBS = S.read_observations(OBS_PATH)
 
 app = FastAPI(
-    title="棒球情境分析 Demo（可行性驗證）",
+    title="棒球情境分析 API",
     description=(
         "輸入比賽情境，回傳該狀態的歷史 RE、樣本數與打席結果分布。\n\n"
         f"資料基礎：{DATA_BASIS}。\n\n"

@@ -1,11 +1,12 @@
-# 棒球情境分析後端（可行性驗證 Demo）
+# 棒球情境分析後端
 
-以中華職棒歷史資料為基礎，驗證「原始資料 → 統計 → 情境查詢 API」這條流程是否可行。
+以中華職棒歷史資料為基礎，建立「原始資料 → 統計 → 情境查詢 API」的完整流程。
 輸入比賽情境（出局數、壘況，另附局數與分差作顯示），回傳該狀態的歷史得分期望值
 （Run Expectancy, RE）、樣本數與打席結果分布。
 
-> 本專案目標是**確認開發可行性**，不是完整的戰術決策系統。所有數字皆為歷史統計，
-> 不是因果推論，也不是戰術建議。
+> 目前已完成從原始資料到可操作 API 的整條流程，所有數字都能追溯到實際比賽資料，
+> 因此可據此評估後續擴充的可行性。本專案目前是情境統計工具，尚不是完整的戰術決策系統；
+> 所有數字皆為歷史統計，不是因果推論，也不是戰術建議。
 
 ## 資料來源與授權
 
@@ -49,10 +50,26 @@ python -m uvicorn main:app --app-dir src
 開啟 http://127.0.0.1:8000/docs 操作。若要開發時自動重載，加上
 `--reload --reload-dir src`（只監看 `src`，避免被 `.venv` 的變動觸發重啟）。
 
-4. 執行測試：
+4. 執行測試（單元測試使用小型合成資料；`test_api.py` 需先完成步驟 2 產生 `re_observations.csv`）：
 
 ```
 python -m pytest tests -v
+```
+
+5. 打包可交付的 ZIP（預設排除 `.venv`、快取、`.git`、`data\raw`、`data\processed`，中文檔名以 UTF-8 寫入）：
+
+```
+python scripts\package_release.py                      # 只含程式、測試與文件
+python scripts\package_release.py --include-api-data   # 另含 API 所需的小型資料（約 10 MB 檔案，壓縮後不到 1 MB），解壓後可直接啟動 API
+```
+
+其他選項：`--include-processed`（完整衍生資料，約 150 MB）、`--include-raw`（原始 JSON）、`--include-git`（版本歷史）。
+不含資料的 ZIP，接收者需自行取得 Rebas 原始 JSON，並依「使用流程」重建。
+
+6. 另存實際安裝的套件版本（用 `ascii` 輸出，避免 PowerShell 預設產生 UTF-16 檔案）：
+
+```
+python -m pip freeze | Out-File -Encoding ascii requirements.lock.txt
 ```
 
 ## 專案結構
@@ -63,7 +80,12 @@ python -m pytest tests -v
 | `src\re_engine.py` | 計算 24 格 RE（三季合併與各季）、與來源對照，並輸出逐打席觀察值 |
 | `src\scenario.py` | 指定 (出局數, 壘況) 的情境分析；CLI 與 API 共用 `analyze()` |
 | `src\main.py` | FastAPI 入口 |
-| `tests\test_api.py` | API 固定測試案例 |
+| `tests\test_data_processor.py` | 匯入程式單元測試：壘況編碼、占位與換人辨識、空 result 分類、品質旗標、重複 ID、安全寫檔 |
+| `tests\test_re_engine.py` | RE 引擎單元測試：剩餘得分、狀態轉移、完整半局、24 格 RE、跑壘中斷納入、輸出全成或全不成 |
+| `tests\test_scenario.py` | 情境分析單元測試：結果分類、觸擊代碼辨識、分析不變式、樣本不足標示 |
+| `tests\test_package_release.py` | 打包腳本測試：排除規則與 UTF-8 檔名 |
+| `tests\test_api.py` | API 固定測試案例（7 項） |
+| `scripts\package_release.py` | 打包可交付 ZIP |
 | `data\raw\` | 原始 JSON（不可修改） |
 | `data\processed\plate_appearances_all.csv` | 逐打席主資料 |
 | `data\processed\re_table.csv` | 24 格 RE 主表（三季合併） |
@@ -184,4 +206,6 @@ python -m pytest tests -v
 - `data_processor.py` 可由原始 JSON 完全重現 `plate_appearances_all.csv`。
 - `re_engine.py` 的輸出可完全重現。
 - `tests\test_api.py` 7 項測試通過（固定案例：0 出局一壘有人、樣本不足、輸入驗證等）。
-- 尚無 `data_processor.py` 與 `re_engine.py` 的單元測試。
+- 單元測試 85 項（匯入、RE 引擎、情境分析、打包腳本），皆以合成資料驗證；
+  刻意改壞程式（例如把不完整半局納入 RE、取消暫存檔清理）時，對應測試會失敗。
+- `re_engine.py` 的四個輸出檔採「全部寫成暫存檔後才取代」，任一步失敗則正式檔維持原樣。

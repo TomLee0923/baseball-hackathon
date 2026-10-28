@@ -1,2 +1,14 @@
-*.csv
-*.json
+# 虛擬環境與快取
+.venv/
+.venv-*/
+__pycache__/
+.pytest_cache/
+*.pyc
+
+# 資料：原始與衍生資料不進版控，請依 README 重建
+data/raw/
+data/processed/
+
+# 暫存與打包輸出
+*.tmp
+*-release.zip

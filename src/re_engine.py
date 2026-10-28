@@ -23,17 +23,20 @@ re_engine.py：由 plate_appearances_all.csv 計算 24 種壘況／出局數狀�
 - next_outs、next_bases：同半局下一個真實打席的打席前狀態；半局最後一個打席為空，
   next_is_half_end 為 True（僅在 half_complete 時有意義）。不使用 endBases。
 
-注意：Rebas 公布的 RE 為 2018 年至今逐日累積值；本引擎主表為 --primary-season
+注意：Rebas 公布的 RE 為 2018 年至今逐日累積值；本引擎主表為 --primary
 指定範圍（預設 pooled＝所有賽季合併），另輸出各季比較（re_by_season.csv）。
 與來源的對照以資料內 RE 欄位（最後 90 天平均）為準，差距僅供量級與趨勢對照。
 """
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+from data_processor import as_int
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_INPUT = PROJECT_ROOT / "data" / "processed" / "plate_appearances_all.csv"
@@ -162,14 +165,6 @@ def build_observations(df):
     return pd.DataFrame(obs_rows), pd.DataFrame(half_rows)
 
 
-def as_int(value):
-    try:
-        number = float(value)
-        return int(number) if number.is_integer() else None
-    except (TypeError, ValueError):
-        return None
-
-
 def build_source_reference(df):
     """
     以資料內來源（Rebas）的 RE 欄位作對照：取資料最後 REFERENCE_WINDOW_DAYS 天、
@@ -241,6 +236,25 @@ def build_by_season_table(obs):
         columns={"n": "n_pooled", "RE": "RE_pooled", "se": "se_pooled"}
     )
     return wide.merge(pooled, on=["outs", "bases"])
+
+
+def write_outputs(items):
+    """
+    先把所有輸出寫成暫存檔，全部成功後才逐一取代正式檔；
+    任何一步寫入失敗，就清除暫存檔，正式檔維持原樣。
+    """
+    staged = []
+    try:
+        for path, write_fn in items:
+            tmp = path.with_name(path.name + ".tmp")
+            write_fn(tmp)
+            staged.append((tmp, path))
+        for tmp, path in staged:
+            os.replace(tmp, path)
+    except Exception:
+        for tmp, _ in staged:
+            tmp.unlink(missing_ok=True)
+        raise
 
 
 def main(argv=None):
@@ -316,12 +330,18 @@ def main(argv=None):
     out = args.output_dir
     out.mkdir(parents=True, exist_ok=True)
     try:
-        table.to_csv(out / "re_table.csv", index=False, encoding="utf-8-sig")
-        by_season.to_csv(out / "re_by_season.csv", index=False, encoding="utf-8-sig")
-        obs.to_csv(out / "re_observations.csv", index=False, encoding="utf-8-sig")
-        (out / "re_summary.json").write_text(
-            json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        write_outputs([
+            (out / "re_table.csv",
+             lambda p: table.to_csv(p, index=False, encoding="utf-8-sig")),
+            (out / "re_by_season.csv",
+             lambda p: by_season.to_csv(p, index=False, encoding="utf-8-sig")),
+            (out / "re_observations.csv",
+             lambda p: obs.to_csv(p, index=False, encoding="utf-8-sig")),
+            (out / "re_summary.json",
+             lambda p: p.write_text(
+                 json.dumps(summary, ensure_ascii=False, indent=2),
+                 encoding="utf-8")),
+        ])
     except PermissionError as error:
         print(f"寫檔失敗（請關閉正在開啟的檔案）：{error}")
         return 1
